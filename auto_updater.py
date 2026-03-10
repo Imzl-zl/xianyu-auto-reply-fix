@@ -403,11 +403,14 @@ class AutoUpdater:
             需要更新的文件列表
         """
         files_to_update = []
+        excluded_count = 0
+        up_to_date_count = 0
         
         for file_update in manifest.files:
             # 跳过被排除的文件
             if self._is_excluded(file_update.path):
                 logger.debug(f"跳过排除的文件: {file_update.path}")
+                excluded_count += 1
                 continue
             
             local_path = self.app_dir / file_update.path
@@ -425,7 +428,12 @@ class AutoUpdater:
                 files_to_update.append(file_update)
                 logger.debug(f"需要更新: {file_update.path} (本地MD5: {local_md5}, 远程MD5: {file_update.md5})")
             else:
-                logger.debug(f"文件已是最新: {file_update.path}")
+                up_to_date_count += 1
+
+        logger.info(
+            f"更新检查完成: 共 {len(manifest.files)} 个文件, 需要更新 {len(files_to_update)} 个, "
+            f"已是最新 {up_to_date_count} 个, 排除 {excluded_count} 个"
+        )
         
         return files_to_update
 

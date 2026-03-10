@@ -14883,9 +14883,17 @@ let remoteVersionInfo = null;
 
 // 本地版本历史（远程服务禁用时使用）
 const LOCAL_VERSION_HISTORY = {
-    version: 'v1.5.5',
+    version: 'v1.5.6',
     intro: '本系统仅供个人学习研究使用，请勿用于商业用途。如有问题或建议，欢迎反馈。',
     versionHistory: [
+        {
+            version: 'v1.5.6',
+            date: '2026-03-11',
+            updates: [
+                '【修复】补发 captcha_control.html 热更新资源，避免 v1.5.5 下该文件因 Release 资源未刷新而反复提示更新',
+                '【优化】热更新检查日志改为汇总输出，不再逐文件打印“文件已是最新”'
+            ]
+        },
         {
             version: 'v1.5.5',
             date: '2026-03-11',
