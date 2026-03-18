@@ -2305,6 +2305,236 @@ class XianyuLive:
 
     
 
+    def _load_json_dict(self, raw_value: Any) -> Dict[str, Any]:
+        """安全解析 JSON 对象。"""
+        if isinstance(raw_value, dict):
+            return raw_value
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            return {}
+        try:
+            parsed = json.loads(raw_value)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _extract_message_card_payload(self, message_1: Any) -> Dict[str, Any]:
+        """提取消息卡片 JSON 载荷。"""
+        if not isinstance(message_1, dict):
+            return {}
+
+        try:
+            message_6 = message_1.get('6', {})
+            if not isinstance(message_6, dict):
+                return {}
+            message_6_3 = message_6.get('3', {})
+            if not isinstance(message_6_3, dict):
+                return {}
+            payload = message_6_3.get('5', '')
+            return self._load_json_dict(payload)
+        except Exception:
+            return {}
+
+    def _extract_message_button_text(self, message_1: Any) -> str:
+        """提取消息卡片按钮文本。"""
+        payload = self._extract_message_card_payload(message_1)
+        try:
+            return str(
+                payload.get('dxCard', {})
+                .get('item', {})
+                .get('main', {})
+                .get('exContent', {})
+                .get('button', {})
+                .get('text', '')
+            ).strip()
+        except Exception:
+            return ''
+
+    def _extract_message_card_title(self, message_1: Any) -> str:
+        """提取消息卡片标题。"""
+        payload = self._extract_message_card_payload(message_1)
+        try:
+            return str(
+                payload.get('dxCard', {})
+                .get('item', {})
+                .get('main', {})
+                .get('exContent', {})
+                .get('title', '')
+            ).strip()
+        except Exception:
+            return ''
+
+    def _classify_message_route(self, *, message: dict, message_1: dict, message_10: dict,
+                                send_message: str) -> Dict[str, Any]:
+        """将消息路由到订单状态、系统提示、特殊流程或真人聊天。"""
+        message_direction = message_1.get('7', 0) if isinstance(message_1, dict) else 0
+        content_type = 0
+        try:
+            message_6 = message_1.get('6', {}) if isinstance(message_1, dict) else {}
+            if isinstance(message_6, dict):
+                message_6_3 = message_6.get('3', {})
+                if isinstance(message_6_3, dict):
+                    content_type = message_6_3.get('4', 0)
+        except Exception:
+            content_type = 0
+
+        biz_tag_raw = str(message_10.get('bizTag', '') or '').strip()
+        biz_tag_dict = self._load_json_dict(biz_tag_raw)
+        ext_json_dict = self._load_json_dict(message_10.get('extJson', ''))
+        task_name = str(biz_tag_dict.get('taskName') or '').strip()
+        update_key = str(ext_json_dict.get('updateKey') or '').strip()
+        detail_notice = str(message_10.get('detailNotice', '') or '').strip()
+        reminder_content = str(message_10.get('reminderContent', '') or send_message or '').strip()
+        reminder_title = str(message_10.get('reminderTitle', '') or '').strip()
+        reminder_notice = str(message_10.get('reminderNotice', '') or '').strip()
+        red_reminder = ''
+        if isinstance(message, dict) and isinstance(message.get('3'), dict):
+            red_reminder = str(message.get('3', {}).get('redReminder', '') or '').strip()
+
+        button_text = self._extract_message_button_text(message_1)
+        card_title = self._extract_message_card_title(message_1)
+        session_type = str(message_10.get('sessionType', '1') or '1').strip()
+        is_group_message = session_type == '30'
+        is_system_biz = bool(task_name) or 'SECURITY' in biz_tag_raw or 'taskId' in biz_tag_raw
+        is_system_message = message_direction == 1 or content_type == 6 or is_system_biz
+
+        texts = []
+        for raw_text in (
+            send_message,
+            reminder_content,
+            detail_notice,
+            reminder_title,
+            reminder_notice,
+            red_reminder,
+            task_name,
+            update_key,
+            button_text,
+            card_title,
+        ):
+            normalized_text = str(raw_text or '').strip()
+            if normalized_text and normalized_text not in texts:
+                texts.append(normalized_text)
+
+        special_flow_messages = {
+            '[卡片消息]',
+            '快给ta一个评价吧~',
+            '快给ta一个评价吧～',
+        }
+        special_flow_titles = {
+            '我已小刀，待刀成',
+            '我已小刀,待刀成',
+            '我已成功小刀，待发货',
+            '我已成功小刀,待发货',
+        }
+
+        if send_message in special_flow_messages or card_title in special_flow_titles:
+            route = 'special_flow'
+            order_status_signal = None
+        else:
+            order_status_signal = None
+            closed_markers = (
+                '[你关闭了订单，钱款已原路退返]',
+                '交易关闭',
+                '订单关闭',
+                '钱款已原路退返',
+            )
+            refund_markers = (
+                '退款中',
+                '退款成功',
+                '退货退款',
+                '退款关闭',
+            )
+            completed_markers = (
+                '[买家确认收货，交易成功]',
+                '[你已确认收货，交易成功]',
+                '买家确认收货',
+                '交易成功',
+            )
+            shipped_markers = (
+                '[你已发货]',
+                '已发货',
+                '等待买家收货',
+            )
+            pending_ship_markers = (
+                '[我已付款，等待你发货]',
+                '[已付款，待发货]',
+                '我已付款，等待你发货',
+                '[记得及时发货]',
+                '等待你发货',
+                '待发货',
+                '去发货',
+                '付款完成待发货',
+                'TRADE_PAID_DONE_SELLER',
+            )
+            pending_payment_markers = (
+                '[我已拍下，待付款]',
+                '买家已拍下，待付款',
+                '待付款',
+                '等待买家付款',
+                '已拍下_未付款',
+            )
+            system_notice_markers = (
+                '闲鱼小红花',
+                '温馨提醒',
+                '曝光卡',
+                '蚂蚁森林',
+                '能量可领',
+                '创建合约',
+                '假客服骗钱',
+                '订单即将自动确认收货',
+                '宝贝性价比如何，去表个态吧',
+                '发来一条消息',
+                '发来一条新消息',
+                '已送出小红花',
+                '已收下',
+            )
+
+            def _contains_any(markers) -> bool:
+                return any(marker and marker in text for text in texts for marker in markers)
+
+            if _contains_any(closed_markers):
+                order_status_signal = 'cancelled'
+            elif _contains_any(refund_markers):
+                order_status_signal = 'refunding'
+            elif _contains_any(completed_markers):
+                order_status_signal = 'completed'
+            elif _contains_any(shipped_markers):
+                order_status_signal = 'shipped'
+            elif _contains_any(pending_ship_markers):
+                order_status_signal = 'pending_ship'
+            elif _contains_any(pending_payment_markers):
+                order_status_signal = 'pending_payment'
+
+            if is_system_message and order_status_signal:
+                route = 'order_status'
+            elif _contains_any(system_notice_markers) and (is_system_message or message_direction != 2):
+                route = 'system_notice'
+            elif is_system_message:
+                route = 'system_notice'
+            else:
+                route = 'user_chat'
+
+        should_notify = False
+        if not is_group_message:
+            if route == 'user_chat':
+                should_notify = True
+            elif route == 'order_status' and order_status_signal in {'pending_ship', 'refunding', 'cancelled'}:
+                should_notify = True
+
+        return {
+            'route': route,
+            'order_status_signal': order_status_signal,
+            'should_notify': should_notify,
+            'allow_auto_reply': route == 'user_chat',
+            'is_system_message': is_system_message,
+            'is_group_message': is_group_message,
+            'message_direction': message_direction,
+            'content_type': content_type,
+            'task_name': task_name,
+            'button_text': button_text,
+            'card_title': card_title,
+            'texts': texts,
+        }
+
     def _is_auto_delivery_trigger(self, message: str) -> bool:
         """检查消息是否为自动发货触发关键字"""
         # 定义所有自动发货触发关键字
@@ -10818,28 +11048,27 @@ Cookie数量: {cookie_count}
 
 
 
-            # 判断消息方向
-            # 注意：系统交易消息有时 senderUserId 也会是自己，不能直接按“手动发出”提前结束
-            message_direction = message_1.get('7', 0) if isinstance(message_1, dict) else 0
-            content_type = 0
-            is_system_biz = False
-            try:
-                message_6 = message_1.get('6', {}) if isinstance(message_1, dict) else {}
-                if isinstance(message_6, dict):
-                    message_6_3 = message_6.get('3', {})
-                    if isinstance(message_6_3, dict):
-                        content_type = message_6_3.get('4', 0)
-            except Exception:
-                pass
+            message_route_info = self._classify_message_route(
+                message=message,
+                message_1=message_1,
+                message_10=message_10,
+                send_message=send_message,
+            )
+            message_route = message_route_info.get('route', 'user_chat')
+            order_status_signal = message_route_info.get('order_status_signal')
+            should_notify_message = bool(message_route_info.get('should_notify'))
+            allow_auto_reply = bool(message_route_info.get('allow_auto_reply'))
+            is_system_message = bool(message_route_info.get('is_system_message'))
+            is_group_message = bool(message_route_info.get('is_group_message'))
+            message_direction = message_route_info.get('message_direction', 0)
+            content_type = message_route_info.get('content_type', 0)
 
-            try:
-                biz_tag = message_10.get("bizTag", "") if isinstance(message_10, dict) else ""
-                if biz_tag and ('SECURITY' in biz_tag or 'taskName' in biz_tag or 'taskId' in biz_tag):
-                    is_system_biz = True
-            except Exception:
-                pass
-
-            is_system_message = message_direction == 1 or content_type == 6 or is_system_biz
+            logger.info(
+                f"【{self.cookie_id}】[{msg_id}] 消息分类: route={message_route}, "
+                f"status_signal={order_status_signal or 'none'}, notify={should_notify_message}, "
+                f"auto_reply={allow_auto_reply}, system={is_system_message}, "
+                f"direction={message_direction}, contentType={content_type}"
+            )
 
             if send_user_id == self.myid and not is_system_message:
                 logger.info(f"[{msg_time}] 【{self.cookie_id}】[{msg_id}] 【手动发出】 商品({item_id}): {send_message}")
@@ -11035,15 +11264,16 @@ Cookie数量: {cookie_count}
                                         logger.info(f"【{self.cookie_id}】[{msg_id}] ⏹️ 处理结束（等待账号重新确认）")
                                         return
 
-                # 🔔 立即发送消息通知（独立于自动回复功能）
-                # 检查是否为群组消息，如果是群组消息则跳过通知
                 try:
-                    session_type = message_10.get("sessionType", "1")  # 默认为个人消息类型
-                    if session_type == "30":
+                    if is_group_message:
                         logger.info(f"📱 检测到群组消息（sessionType=30），跳过消息通知")
-                    else:
-                        # 只对个人消息发送通知
+                    elif should_notify_message:
                         await self.send_notification(send_user_name, send_user_id, send_message, item_id, chat_id)
+                    else:
+                        logger.info(
+                            f"📱 当前消息不发送通知: route={message_route}, "
+                            f"status_signal={order_status_signal or 'none'}, message={send_message}"
+                        )
                 except Exception as notify_error:
                     logger.error(f"📱 发送消息通知失败: {self._safe_str(notify_error)}")
 
@@ -11123,24 +11353,15 @@ Cookie数量: {cookie_count}
                     )
 
             # 【优先处理】检查系统消息和自动发货触发消息（不受人工接入暂停影响）
-            ignore_keywords = [
+            fallback_ignore_keywords = [
                 '不想宝贝被砍价',
                 'AI正在帮你回复',
-                '发来一条',              # 匹配 '发来一条消息' 和 '发来一条新消息'
-                '确认收货，交易成功',     # 匹配 '[买家确认收货，交易成功]' 和 '[你已确认收货，交易成功]'
-                '闲鱼小红花',            # 匹配 '卖家人不错？送Ta闲鱼小红花' 和 '你人真不错，送你闲鱼小红花'
-                '你已发货',              # 匹配 '[你已发货]' 和 '你已发货'，避免误匹配买家消息如"你已发货了吗"
+                '发来一条',
                 '小心假客服骗钱',
-                '「我将「退货退款」修改为「退款」」',
-                '订单已签收',
                 '蚂蚁森林能量',
-                '订单即将自动确认收货',
-                '我完成了评价',
-                '创建合约',
                 '恭喜你拿到曝光卡',
-                '退款成功，钱款已原路退返',
-                '宝贝性价比如何，去表个态吧',
-                '温馨提醒'              # 匹配 '温馨提醒：商品信息近期有过变更，请与买家沟通一致，防止误拍引起纠纷'，以及其他买家/卖家可能的自动回复消息
+                '订单即将自动确认收货',
+                '温馨提醒：商品信息近期有过变更',
             ]
             if send_message == '[我已拍下，待付款]':
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 系统消息不处理')
@@ -11159,26 +11380,17 @@ Cookie数量: {cookie_count}
                 await self.handle_auto_comment(message, msg_time, msg_id)
                 logger.info(f"【{self.cookie_id}】[{msg_id}] ⏹️ 处理结束（评价提醒消息）")
                 return
-            elif any(keyword in send_message for keyword in ignore_keywords):
-                logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ⏹️ 系统消息不处理: {send_message}')
+            elif message_route == 'system_notice' or any(keyword in send_message for keyword in fallback_ignore_keywords):
+                logger.info(
+                    f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ⏹️ 系统提示消息不处理: '
+                    f'route={message_route}, message={send_message}'
+                )
                 return
             # 简化消息通过 sid 查找订单，更可靠
-            elif self._is_auto_delivery_trigger(send_message):
+            elif message_route == 'order_status' and self._is_auto_delivery_trigger(send_message):
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 检测到自动发货触发消息: {send_message}')
 
                 # 只允许系统消息触发自动发货，防止买家手动输入关键字触发
-                message_direction = message_1.get('7', 0) if isinstance(message_1, dict) else 0
-                content_type = 0
-                try:
-                    message_6 = message_1.get('6', {}) if isinstance(message_1, dict) else {}
-                    if isinstance(message_6, dict):
-                        message_6_3 = message_6.get('3', {})
-                        if isinstance(message_6_3, dict):
-                            content_type = message_6_3.get('4', 0)
-                except Exception:
-                    pass
-
-                is_system_message = message_direction == 1 or content_type == 6
                 if not is_system_message:
                     logger.warning(
                         f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ⚠️ 自动发货关键字来自非系统消息，已忽略 '
@@ -11335,6 +11547,13 @@ Cookie数量: {cookie_count}
                         db_manager.update_buyer_nick_by_buyer_id(send_user_id, valid_buyer_nick, self.cookie_id)
                     except Exception as e:
                         logger.debug(f"更新买家昵称失败: {self._safe_str(e)}")
+
+            if not allow_auto_reply:
+                logger.info(
+                    f"【{self.cookie_id}】[{msg_id}] ⏹️ 当前消息不进入自动回复链: "
+                    f"route={message_route}, status_signal={order_status_signal or 'none'}"
+                )
+                return
 
             # 使用防抖机制处理聊天消息回复
             # 如果用户连续发送消息，等待用户停止发送后再回复最后一条消息
