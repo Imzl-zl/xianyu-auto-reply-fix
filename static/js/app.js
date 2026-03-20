@@ -2640,10 +2640,13 @@ async function loadCookies() {
             <button class="btn btn-sm btn-outline-warning" onclick="configAIReply('${cookie.id}')" title="配置AI回复" ${!isEnabled ? 'disabled' : ''}>
                 <i class="bi bi-robot"></i>
             </button>
-            <button class="btn btn-sm btn-outline-info" onclick="copyCookie('${cookie.id}')" title="复制Cookie">
-                <i class="bi bi-clipboard"></i>
+            <button class="btn btn-sm btn-outline-secondary" onclick="polishAccountItems('${cookie.id}')" title="一键擦亮" ${!isEnabled ? 'disabled' : ''}>
+                <i class="bi bi-stars"></i>
             </button>
-            
+            <button class="btn btn-sm btn-outline-info" onclick="openPolishScheduleModal('${cookie.id}')" title="定时擦亮" ${!isEnabled ? 'disabled' : ''}>
+                <i class="bi bi-clock"></i>
+            </button>
+
             <button class="btn btn-sm btn-outline-danger" onclick="delCookie('${cookie.id}')" title="删除账号">
                 <i class="bi bi-trash"></i>
             </button>
@@ -2704,6 +2707,28 @@ async function copyCookie(id) {
     } catch (error) {
     console.error('获取Cookie详情失败:', error);
     showToast('获取Cookie详情失败，请稍后重试', 'danger');
+    }
+}
+
+// 一键擦亮
+async function polishAccountItems(accountId) {
+    toggleLoading(true);
+    showToast('正在擦亮所有商品，请稍候...', 'info');
+    try {
+        const response = await fetch(`${apiBase}/accounts/${encodeURIComponent(accountId)}/polish-items`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${authToken}` }
+        });
+        const data = await response.json();
+        if (data.success) {
+            showToast(`擦亮完成: ${data.polished}/${data.total} 个商品成功`, 'success');
+        } else {
+            showToast(`擦亮失败: ${data.message}`, 'danger');
+        }
+    } catch (error) {
+        showToast(`擦亮请求异常: ${error.message}`, 'danger');
+    } finally {
+        toggleLoading(false);
     }
 }
 
@@ -7472,7 +7497,7 @@ const DEFAULT_MENU_ITEMS = [
     { id: 'message-notifications', name: '消息通知', icon: 'bi-chat-dots', required: false },
     { id: 'online-im', name: '在线客服', icon: 'bi-headset', required: false },
     { id: 'system-settings', name: '系统设置', icon: 'bi-gear', required: true },
-    { id: 'about', name: '关于', icon: 'bi-info-circle', required: false }
+    { id: 'about', name: '关于', icon: 'bi-info-circle', required: true }
 ];
 
 // 当前菜单设置
@@ -17177,5 +17202,218 @@ function loadOnlineIm() {
     if (iframe && iframe.src === 'about:blank') {
         const realSrc = iframe.dataset.src || 'https://www.goofish.com/im';
         iframe.src = realSrc;
+    }
+}
+
+// ==================== 定时擦亮任务管理 ====================
+
+const POLISH_SCHEDULE_RANDOM_MINUTES = 10;
+
+async function loadScheduledTasks() {
+    try {
+        const data = await fetchJSON(`${apiBase}/scheduled-tasks`);
+        if (data.success) {
+            return data.tasks || [];
+        }
+        showToast(`加载定时任务失败: ${data.message || '未知错误'}`, 'danger');
+        return [];
+    } catch (error) {
+        console.error('加载定时任务失败:', error);
+        return [];
+    }
+}
+
+async function createScheduledTask(accountId, runHour, enabled = true) {
+    return fetchJSON(`${apiBase}/scheduled-tasks`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            account_id: accountId,
+            run_hour: runHour,
+            enabled,
+            random_delay_max: POLISH_SCHEDULE_RANDOM_MINUTES
+        })
+    });
+}
+
+async function updateScheduledTask(taskId, payload) {
+    return fetchJSON(`${apiBase}/scheduled-tasks/${taskId}`, {
+        method: 'PUT',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+    });
+}
+
+function getPolishScheduledTask(tasks, accountId) {
+    const matchedTasks = tasks
+        .filter(task => task.account_id === accountId && task.task_type === 'item_polish')
+        .sort((a, b) => Number(Boolean(b.enabled)) - Number(Boolean(a.enabled)) || Number(b.id) - Number(a.id));
+
+    return matchedTasks[0] || null;
+}
+
+function formatPolishScheduleHour(hour) {
+    const safeHour = Number.isFinite(Number(hour)) ? Number(hour) : 0;
+    return `${String(safeHour).padStart(2, '0')}:00`;
+}
+
+function getPolishScheduleDescription(hour) {
+    return `每日 ${formatPolishScheduleHour(hour)} 后随机 0-${POLISH_SCHEDULE_RANDOM_MINUTES} 分钟擦亮一次`;
+}
+
+function closePolishScheduleModal() {
+    const modalElement = document.getElementById('polishScheduleModal');
+    if (!modalElement) return;
+
+    const modalInstance = bootstrap.Modal.getInstance(modalElement);
+    if (modalInstance) {
+        modalInstance.hide();
+    } else {
+        modalElement.remove();
+    }
+}
+
+function refreshPolishScheduleModalState() {
+    const enabledInput = document.getElementById('polishScheduleEnabled');
+    const hourSelect = document.getElementById('polishScheduleHour');
+    const hint = document.getElementById('polishScheduleHint');
+
+    if (!enabledInput || !hourSelect || !hint) return;
+
+    const enabled = enabledInput.checked;
+    const runHour = parseInt(hourSelect.value, 10);
+
+    hint.className = `alert ${enabled ? 'alert-info' : 'alert-secondary'} py-2 mb-3`;
+    hint.textContent = enabled
+        ? getPolishScheduleDescription(runHour)
+        : `当前已关闭，保存后会记住 ${formatPolishScheduleHour(runHour)} 的设置，但不会自动执行`;
+}
+
+async function openPolishScheduleModal(accountId) {
+    try {
+        const tasks = await loadScheduledTasks();
+        const task = getPolishScheduledTask(tasks, accountId);
+        const runHour = Number.isFinite(Number(task?.delay_minutes)) ? Number(task.delay_minutes) : 8;
+        const enabled = task ? Boolean(task.enabled) : true;
+        const hourOptions = Array.from({ length: 24 }, (_, hour) => `
+            <option value="${hour}" ${hour === runHour ? 'selected' : ''}>${formatPolishScheduleHour(hour)}</option>
+        `).join('');
+        const statusText = task ? (task.enabled ? '已开启' : '未开启') : '保存后启用';
+        const nextRunText = task ? (task.enabled ? (task.next_run_at || '保存后生成') : '已关闭') : '保存后生成';
+        const lastRunText = task?.last_run_at || '暂无记录';
+
+        const existingModal = document.getElementById('polishScheduleModal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        const modalHtml = `
+            <div class="modal fade" id="polishScheduleModal" tabindex="-1" aria-labelledby="polishScheduleModalLabel" aria-hidden="true">
+                <div class="modal-dialog modal-dialog-centered">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title" id="polishScheduleModalLabel">
+                                <i class="bi bi-clock-history text-info me-2"></i>定时擦亮 - ${accountId}
+                            </h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                            <input type="hidden" id="polishScheduleAccountId" value="${accountId}">
+                            <input type="hidden" id="polishScheduleTaskId" value="${task ? task.id : ''}">
+
+                            <div class="form-check form-switch mb-3">
+                                <input class="form-check-input" type="checkbox" role="switch" id="polishScheduleEnabled" ${enabled ? 'checked' : ''}>
+                                <label class="form-check-label" for="polishScheduleEnabled">启用每日定时擦亮</label>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label" for="polishScheduleHour">每日几点开始擦亮</label>
+                                <select class="form-select" id="polishScheduleHour">
+                                    ${hourOptions}
+                                </select>
+                            </div>
+
+                            <div class="alert alert-info py-2 mb-3" id="polishScheduleHint">
+                                ${getPolishScheduleDescription(runHour)}
+                            </div>
+
+                            <div class="small text-muted">
+                                <div>当前状态：${statusText}</div>
+                                <div>下次执行：${nextRunText}</div>
+                                <div>上次执行：${lastRunText}</div>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                            <button type="button" class="btn btn-primary" onclick="savePolishSchedule()">保存设置</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+        const modalElement = document.getElementById('polishScheduleModal');
+        const modalInstance = new bootstrap.Modal(modalElement);
+        modalElement.addEventListener('hidden.bs.modal', function () {
+            modalElement.remove();
+        });
+
+        document.getElementById('polishScheduleEnabled').addEventListener('change', refreshPolishScheduleModalState);
+        document.getElementById('polishScheduleHour').addEventListener('change', refreshPolishScheduleModalState);
+        refreshPolishScheduleModalState();
+
+        modalInstance.show();
+    } catch (error) {
+        console.error('打开定时擦亮设置失败:', error);
+    }
+}
+
+async function savePolishSchedule() {
+    const accountId = document.getElementById('polishScheduleAccountId')?.value;
+    const taskId = parseInt(document.getElementById('polishScheduleTaskId')?.value || '', 10);
+    const enabled = document.getElementById('polishScheduleEnabled')?.checked;
+    const runHour = parseInt(document.getElementById('polishScheduleHour')?.value || '', 10);
+
+    if (!accountId) {
+        showToast('缺少账号ID', 'warning');
+        return;
+    }
+
+    if (!Number.isInteger(runHour) || runHour < 0 || runHour > 23) {
+        showToast('请选择有效的擦亮时间', 'warning');
+        return;
+    }
+
+    try {
+        let data;
+
+        if (taskId) {
+            data = await updateScheduledTask(taskId, {
+                run_hour: runHour,
+                enabled,
+                random_delay_max: POLISH_SCHEDULE_RANDOM_MINUTES
+            });
+        } else {
+            data = await createScheduledTask(accountId, runHour, enabled);
+        }
+
+        if (!data.success) {
+            showToast(`保存失败: ${data.message || '未知错误'}`, 'danger');
+            return;
+        }
+
+        const successMessage = enabled
+            ? `${accountId} 已设置为 ${getPolishScheduleDescription(runHour)}`
+            : `${accountId} 已保存 ${formatPolishScheduleHour(runHour)} 的定时擦亮时间，当前为关闭状态`;
+        showToast(successMessage, 'success');
+        closePolishScheduleModal();
+    } catch (error) {
+        console.error('保存定时擦亮设置失败:', error);
     }
 }

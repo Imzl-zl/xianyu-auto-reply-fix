@@ -723,6 +723,15 @@ setup_file_logging()
 from loguru import logger
 logger.info("Web服务器启动，文件日志收集器已初始化")
 
+
+# 启动定时任务调度器
+@app.on_event("startup")
+async def start_scheduled_task_checker():
+    """应用启动时开启定时任务检查协程"""
+    asyncio.create_task(scheduled_task_checker())
+    logger.info("定时任务调度器已启动")
+
+
 # 添加请求日志中间件
 @app.middleware("http")
 async def log_requests(request, call_next):
@@ -8765,6 +8774,298 @@ async def restart_application(current_user: Dict[str, Any] = Depends(get_current
             "success": False,
             "message": f"重启应用失败: {str(e)}"
         }
+
+
+# ==================== 一键擦亮API ====================
+
+@app.post("/accounts/{cid}/polish-items")
+async def polish_account_items(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """擦亮指定账号的所有在售商品"""
+    try:
+        cookie_info = db_manager.get_cookie_by_id(cid)
+        if not cookie_info:
+            return {"success": False, "message": "未找到指定的账号信息"}
+
+        cookies_str = cookie_info.get('cookies_str', '')
+        if not cookies_str:
+            return {"success": False, "message": "账号cookie信息为空"}
+
+        from XianyuAutoAsync import XianyuLive
+        xianyu_instance = XianyuLive(cookies_str, cid)
+
+        logger.info(f"开始擦亮账号 {cid} 的所有商品")
+        result = await xianyu_instance.polish_all_items()
+
+        await xianyu_instance.close_session()
+
+        return result
+
+    except Exception as e:
+        logger.error(f"擦亮账号商品异常: {str(e)}")
+        return {"success": False, "message": f"擦亮异常: {str(e)}"}
+
+
+# ==================== 定时任务管理API ====================
+
+def _parse_enabled_flag(value):
+    """将不同类型的 enabled 入参统一转换为 0/1"""
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)):
+        return 1 if int(value) else 0
+    if isinstance(value, str):
+        return 1 if value.strip().lower() in {'1', 'true', 'yes', 'on'} else 0
+    return 1 if value else 0
+
+
+def _parse_run_hour(value, default=8):
+    run_hour = default if value is None else int(value)
+    if run_hour < 0 or run_hour > 23:
+        raise ValueError("运行时间必须在 0-23 之间")
+    return run_hour
+
+
+def _parse_random_delay(value, default=10):
+    random_delay_max = default if value is None else int(value)
+    if random_delay_max < 0:
+        raise ValueError("随机分钟不能小于 0")
+    return random_delay_max
+
+@app.post("/scheduled-tasks")
+async def create_scheduled_task(request: dict, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """创建定时任务"""
+    try:
+        account_id = request.get('account_id', '').strip()
+        run_hour = _parse_run_hour(request.get('run_hour', request.get('delay_minutes', 8)))
+        random_delay_max = _parse_random_delay(request.get('random_delay_max', 10), 10)
+        enabled = _parse_enabled_flag(request.get('enabled', True))
+
+        if not account_id:
+            return {"success": False, "message": "账号ID不能为空"}
+
+        name = f"每日擦亮-{account_id}"
+        next_run_at = db_manager.calculate_next_daily_run(run_hour, random_delay_max, include_today=True)
+
+        existing_task = db_manager.get_scheduled_task_by_account(
+            account_id,
+            user_id=current_user['user_id'],
+            task_type='item_polish'
+        )
+
+        if existing_task:
+            updated = db_manager.update_scheduled_task(
+                existing_task['id'],
+                name=name,
+                interval_hours=24,
+                delay_minutes=run_hour,
+                random_delay_max=random_delay_max,
+                enabled=enabled,
+                next_run_at=next_run_at
+            )
+            if updated:
+                task = db_manager.get_scheduled_task(existing_task['id'])
+                return {
+                    "success": True,
+                    "message": "定时擦亮任务更新成功",
+                    "task_id": existing_task['id'],
+                    "task": task
+                }
+            return {"success": False, "message": "更新定时任务失败"}
+
+        task_id = db_manager.create_scheduled_task(
+            name=name, task_type='item_polish', account_id=account_id,
+            user_id=current_user['user_id'],
+            interval_hours=24, delay_minutes=run_hour,
+            random_delay_max=random_delay_max,
+            next_run_at=next_run_at,
+            enabled=enabled
+        )
+
+        if task_id:
+            task = db_manager.get_scheduled_task(task_id)
+            return {"success": True, "message": "定时擦亮任务创建成功", "task_id": task_id, "task": task}
+        else:
+            return {"success": False, "message": "创建定时任务失败"}
+    except Exception as e:
+        logger.error(f"创建定时任务异常: {str(e)}")
+        return {"success": False, "message": f"创建定时任务异常: {str(e)}"}
+
+
+@app.get("/scheduled-tasks")
+async def list_scheduled_tasks(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """获取定时任务列表"""
+    try:
+        tasks = db_manager.get_scheduled_tasks(user_id=current_user['user_id'])
+        return {"success": True, "tasks": tasks}
+    except Exception as e:
+        logger.error(f"获取定时任务列表异常: {str(e)}")
+        return {"success": False, "message": f"获取定时任务列表异常: {str(e)}"}
+
+
+@app.put("/scheduled-tasks/{task_id}")
+async def update_scheduled_task(task_id: int, request: dict, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """更新定时任务"""
+    try:
+        task = db_manager.get_scheduled_task(task_id)
+        if not task:
+            return {"success": False, "message": "任务不存在"}
+        if task['user_id'] != current_user['user_id']:
+            return {"success": False, "message": "无权修改此任务"}
+
+        kwargs = {}
+
+        if 'name' in request:
+            name = str(request.get('name') or '').strip()
+            if name:
+                kwargs['name'] = name
+
+        if 'interval_hours' in request:
+            kwargs['interval_hours'] = int(request.get('interval_hours', task.get('interval_hours', 24)))
+
+        if 'run_hour' in request or 'delay_minutes' in request:
+            kwargs['delay_minutes'] = _parse_run_hour(request.get('run_hour', request.get('delay_minutes')))
+
+        if 'random_delay_max' in request:
+            kwargs['random_delay_max'] = _parse_random_delay(
+                request.get('random_delay_max'),
+                task.get('random_delay_max', 10)
+            )
+
+        if 'enabled' in request:
+            kwargs['enabled'] = _parse_enabled_flag(request.get('enabled'))
+
+        effective_enabled = kwargs.get('enabled', 1 if task['enabled'] else 0)
+        effective_run_hour = kwargs.get('delay_minutes', task.get('delay_minutes', 8))
+        effective_random_delay = kwargs.get('random_delay_max', task.get('random_delay_max', 10))
+
+        if task['task_type'] == 'item_polish' and effective_enabled:
+            should_reschedule = (
+                'delay_minutes' in kwargs or
+                'random_delay_max' in kwargs or
+                ('enabled' in kwargs and not task['enabled'])
+            )
+            if should_reschedule:
+                kwargs['next_run_at'] = db_manager.calculate_next_daily_run(
+                    effective_run_hour,
+                    effective_random_delay,
+                    include_today=True
+                )
+
+        if not kwargs:
+            return {"success": False, "message": "没有可更新的字段"}
+
+        if db_manager.update_scheduled_task(task_id, **kwargs):
+            updated_task = db_manager.get_scheduled_task(task_id)
+            return {"success": True, "message": "定时任务更新成功", "task": updated_task}
+        else:
+            return {"success": False, "message": "更新失败"}
+    except Exception as e:
+        logger.error(f"更新定时任务异常: {str(e)}")
+        return {"success": False, "message": f"更新定时任务异常: {str(e)}"}
+
+
+@app.delete("/scheduled-tasks/{task_id}")
+async def delete_scheduled_task(task_id: int, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """删除定时任务"""
+    try:
+        task = db_manager.get_scheduled_task(task_id)
+        if not task:
+            return {"success": False, "message": "任务不存在"}
+        if task['user_id'] != current_user['user_id']:
+            return {"success": False, "message": "无权删除此任务"}
+
+        if db_manager.delete_scheduled_task(task_id):
+            return {"success": True, "message": "定时任务已删除"}
+        else:
+            return {"success": False, "message": "删除失败"}
+    except Exception as e:
+        logger.error(f"删除定时任务异常: {str(e)}")
+        return {"success": False, "message": f"删除定时任务异常: {str(e)}"}
+
+
+@app.put("/scheduled-tasks/{task_id}/toggle")
+async def toggle_scheduled_task(task_id: int, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """启用/禁用定时任务"""
+    try:
+        task = db_manager.get_scheduled_task(task_id)
+        if not task:
+            return {"success": False, "message": "任务不存在"}
+        if task['user_id'] != current_user['user_id']:
+            return {"success": False, "message": "无权操作此任务"}
+
+        new_enabled = 0 if task['enabled'] else 1
+        update_kwargs = {'enabled': new_enabled}
+        if new_enabled:
+            update_kwargs['next_run_at'] = db_manager.calculate_next_daily_run(
+                task.get('delay_minutes', 8),
+                task.get('random_delay_max', 10),
+                include_today=True
+            )
+
+        if db_manager.update_scheduled_task(task_id, **update_kwargs):
+            status = "启用" if new_enabled else "禁用"
+            updated_task = db_manager.get_scheduled_task(task_id)
+            return {
+                "success": True,
+                "message": f"定时任务已{status}",
+                "enabled": bool(new_enabled),
+                "task": updated_task
+            }
+        else:
+            return {"success": False, "message": "操作失败"}
+    except Exception as e:
+        logger.error(f"切换定时任务状态异常: {str(e)}")
+        return {"success": False, "message": f"操作异常: {str(e)}"}
+
+
+# ==================== 定时任务调度器 ====================
+
+async def scheduled_task_checker():
+    """每60秒检查并执行到期的定时任务"""
+    while True:
+        try:
+            due_tasks = db_manager.get_due_tasks()
+            for task in due_tasks:
+                try:
+                    account_id = task['account_id']
+                    task_id = task['id']
+                    task_type = task['task_type']
+
+                    logger.info(f"执行定时任务: {task['name']} (ID: {task_id}, 账号: {account_id})")
+
+                    if task_type == 'item_polish':
+                        cookie_info = db_manager.get_cookie_by_id(account_id)
+                        if not cookie_info:
+                            logger.warning(f"定时任务 {task_id} 账号 {account_id} 不存在，跳过")
+                            result = {"success": False, "message": "账号不存在"}
+                        else:
+                            cookies_str = cookie_info.get('cookies_str', '')
+                            if not cookies_str:
+                                result = {"success": False, "message": "账号cookie为空"}
+                            else:
+                                from XianyuAutoAsync import XianyuLive
+                                xianyu_instance = XianyuLive(cookies_str, account_id)
+                                result = await xianyu_instance.polish_all_items()
+                                await xianyu_instance.close_session()
+                    else:
+                        result = {"success": False, "message": f"未知任务类型: {task_type}"}
+
+                    run_hour = task.get('delay_minutes', 8)  # delay_minutes 复用为每日运行小时
+                    random_max = task.get('random_delay_max', 10)
+                    next_run_str = db_manager.calculate_next_daily_run(
+                        run_hour,
+                        random_max,
+                        include_today=False
+                    )
+
+                    db_manager.update_task_run_result(task_id, result, next_run_str)
+                    logger.info(f"定时任务 {task_id} 执行完毕，下次运行: {next_run_str}")
+
+                except Exception as e:
+                    logger.error(f"执行定时任务 {task.get('id')} 异常: {str(e)}")
+        except Exception as e:
+            logger.error(f"定时任务检查异常: {str(e)}")
+        await asyncio.sleep(60)
 
 
 # 移除自动启动，由Start.py或手动启动

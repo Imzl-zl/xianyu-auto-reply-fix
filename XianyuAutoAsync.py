@@ -12621,6 +12621,26 @@ Cookie数量: {cookie_count}
             "items": all_items
         }
 
+    def _get_item_polish_module(self):
+        if os.getenv('ITEM_POLISH_IMPL', '').strip().lower() == 'plain':
+            from item_polish_module import ItemPolishModule
+        else:
+            from secure_item_polish_ultra import ItemPolishModule
+
+        return ItemPolishModule(self)
+
+    async def polish_item(self, item_id, retry_count=0):
+        """擦亮单个商品。"""
+        return await self._get_item_polish_module().polish_item(item_id, retry_count)
+
+    async def _polish_item_backup(self, item_id):
+        """使用备用API擦亮商品。"""
+        return await self._get_item_polish_module()._polish_item_backup(item_id)
+
+    async def polish_all_items(self):
+        """擦亮所有在售商品。"""
+        return await self._get_item_polish_module().polish_all_items()
+
     async def send_image_msg(self, ws, cid, toid, image_url, width=800, height=600, card_id=None):
         """发送图片消息"""
         try:
