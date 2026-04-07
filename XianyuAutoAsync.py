@@ -654,6 +654,15 @@ class XianyuLive:
             return "risk_control", 900
         if any(keyword in message for keyword in ["滑块验证失败", "未找到滑块容器"]):
             return "slider_failed", 600
+        if any(
+            keyword in message for keyword in [
+                "未找到登录表单",
+                "未找到登录iframe",
+                "session过期且清理会话状态后未找到登录表单",
+                "session验证异常且清理会话状态后未找到登录表单",
+            ]
+        ):
+            return "login_form_missing", 90
         if any(keyword in message for keyword in ["页面会话已失效", "target page, context or browser has been closed"]):
             return "unknown", 180
         if any(keyword in message for keyword in ["网络", "timeout", "cannot connect", "连接", "dns", "ssl"]):
