@@ -7910,7 +7910,7 @@ Cookie数量: {cookie_count}
         if '扫码登录获取真实cookie' in description:
             return 'qr_login'
 
-        if event_type in {'face_verify', 'sms_verify', 'qr_verify', 'password_error'}:
+        if event_type in {'face_verify', 'sms_verify', 'qr_verify', 'unknown', 'password_error'}:
             return 'password_login'
 
         if '连续失败5次' in description or '关键api不可用' in lower_text or 'cookie验证失败' in description:

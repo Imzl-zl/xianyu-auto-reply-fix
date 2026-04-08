@@ -2218,15 +2218,90 @@ class XianyuSliderStealth:
 
         return None, None
 
+    def _probe_login_form_state(self, frame) -> Dict[str, Any]:
+        """探测当前 frame 是否具备真正可交互的账密登录表单。"""
+        if not frame:
+            return {
+                'is_login_form': False,
+                'probe_type': 'missing',
+                'matched_selector': None,
+                'matched_text': None,
+            }
+
+        selectors = self._get_password_login_selectors()
+        account_input, account_selector = self._query_first_visible(frame, selectors['account'])
+        if account_input:
+            return {
+                'is_login_form': True,
+                'probe_type': 'account_input',
+                'matched_selector': account_selector,
+                'matched_text': None,
+            }
+
+        password_input, password_selector = self._query_first_visible(frame, selectors['password'])
+        if password_input:
+            return {
+                'is_login_form': True,
+                'probe_type': 'password_input',
+                'matched_selector': password_selector,
+                'matched_text': None,
+            }
+
+        password_tab, tab_selector = self._query_first_visible(frame, selectors['tab'])
+        submit_button, submit_selector = self._query_first_visible(frame, selectors['submit'])
+
+        submit_text = None
+        if submit_button:
+            try:
+                submit_text = ' '.join((submit_button.inner_text() or '').split())
+            except Exception:
+                submit_text = None
+
+        if password_tab and submit_button:
+            return {
+                'is_login_form': True,
+                'probe_type': 'password_tab_plus_submit',
+                'matched_selector': f"{tab_selector} + {submit_selector}",
+                'matched_text': submit_text,
+            }
+
+        if submit_button:
+            probe_type = 'submit_only'
+            submit_text_value = submit_text or ''
+            if submit_selector == 'text=登录' or any(
+                keyword in submit_text_value for keyword in ('进入', '继续', '去登录', '去看看')
+            ):
+                probe_type = 'direct_enter_like'
+            return {
+                'is_login_form': False,
+                'probe_type': probe_type,
+                'matched_selector': submit_selector,
+                'matched_text': submit_text,
+            }
+
+        if password_tab:
+            return {
+                'is_login_form': False,
+                'probe_type': 'tab_only',
+                'matched_selector': tab_selector,
+                'matched_text': None,
+            }
+
+        return {
+            'is_login_form': False,
+            'probe_type': 'none',
+            'matched_selector': None,
+            'matched_text': None,
+        }
+
     def _find_login_form_with_retry(self, page, timeout_seconds: float = 8.0,
                                     poll_interval: float = 1.0):
         if not page:
             return None, False, None
 
-        selectors = self._get_password_login_selectors()
-        probe_selectors = selectors['account'] + selectors['password'] + selectors['submit']
         deadline = time.time() + max(timeout_seconds, 0.0)
         attempt = 0
+        last_non_form_probe = None
 
         while True:
             attempt += 1
@@ -2240,18 +2315,38 @@ class XianyuSliderStealth:
                 pass
 
             for frame_label, frame in search_frames:
-                element, matched_selector = self._query_first_visible(frame, probe_selectors)
-                if element:
+                probe_info = self._probe_login_form_state(frame)
+                if probe_info.get('is_login_form'):
+                    matched_selector = probe_info.get('matched_selector')
+                    probe_type = probe_info.get('probe_type')
+                    probe_text = probe_info.get('matched_text')
+                    probe_note = f" [{probe_text}]" if probe_text else ""
                     logger.info(
-                        f"【{self.pure_user_id}】✓ 第{attempt}次探测在{frame_label}找到登录表单: {matched_selector}"
+                        f"【{self.pure_user_id}】✓ 第{attempt}次探测在{frame_label}找到登录表单({probe_type}): "
+                        f"{matched_selector}{probe_note}"
                     )
                     return frame, True, matched_selector
+
+                if probe_info.get('probe_type') not in {'missing', 'none'}:
+                    last_non_form_probe = {
+                        'frame_label': frame_label,
+                        'attempt': attempt,
+                        **probe_info,
+                    }
 
             if time.time() >= deadline:
                 break
 
             time.sleep(max(poll_interval, 0.1))
 
+        if last_non_form_probe:
+            probe_text = last_non_form_probe.get('matched_text')
+            probe_note = f" [{probe_text}]" if probe_text else ""
+            logger.warning(
+                f"【{self.pure_user_id}】登录表单探测超时，最近一次仅命中非表单态"
+                f"({last_non_form_probe.get('probe_type')})，位置={last_non_form_probe.get('frame_label')}，"
+                f"选择器={last_non_form_probe.get('matched_selector')}{probe_note}"
+            )
         logger.warning(
             f"【{self.pure_user_id}】在 {timeout_seconds:.1f}s 内未探测到登录表单"
         )
@@ -2316,9 +2411,6 @@ class XianyuSliderStealth:
         if not page:
             return False
 
-        selectors = self._get_password_login_selectors()
-        login_selectors = selectors['account'] + selectors['password'] + selectors['submit']
-
         frames_to_check = [page]
         try:
             frames_to_check.extend(list(page.frames))
@@ -2326,13 +2418,11 @@ class XianyuSliderStealth:
             pass
 
         for frame in frames_to_check:
-            for selector in login_selectors:
-                try:
-                    element = frame.query_selector(selector)
-                    if element and element.is_visible():
-                        return True
-                except Exception:
-                    continue
+            try:
+                if self._probe_login_form_state(frame).get('is_login_form'):
+                    return True
+            except Exception:
+                continue
 
         return False
 
@@ -2457,6 +2547,46 @@ class XianyuSliderStealth:
                     pass
 
         return False, monitor_page, cookie_dict
+
+    def _recover_from_missing_login_inputs(
+        self,
+        context,
+        page,
+        *,
+        missing_field: str,
+        notification_callback: Optional[Callable] = None,
+        notification_scene: str = '账号密码登录',
+    ) -> Tuple[bool, Any]:
+        logger.warning(
+            f"【{self.pure_user_id}】未找到{missing_field}，复检当前页面是否处于已登录态或验证页..."
+        )
+
+        login_success, active_page, _ = self._probe_context_login_success(context, page)
+        if login_success:
+            cookies_dict = self._snapshot_context_cookies(context)
+            logger.info(f"【{self.pure_user_id}】复检已登录成功，Cookie字段数: {len(cookies_dict)}")
+            if cookies_dict:
+                self._log_cookie_snapshot_integrity(cookies_dict, f"{missing_field}复检已登录场景")
+                logger.success(f"【{self.pure_user_id}】✅ 页面实际已登录，停止继续账密输入")
+                return True, cookies_dict
+
+            logger.error(f"【{self.pure_user_id}】❌ 复检已登录后仍未获取到有效Cookie")
+            return True, self._fail_login("复检已登录后未获取到有效Cookie")
+
+        monitor_page = self._select_monitor_page(context, active_page or page) or active_page or page
+        if monitor_page:
+            has_qr, qr_frame = self._detect_qr_code_verification(monitor_page)
+            if has_qr:
+                logger.info(f"【{self.pure_user_id}】复检发现当前页面需要人工验证，转入验证流程")
+                return True, self._process_verification_requirement(
+                    context,
+                    monitor_page,
+                    qr_frame,
+                    notification_callback,
+                    notification_scene,
+                )
+
+        return False, None
 
     def _page_has_slider(self, page) -> bool:
         if not page:
@@ -5755,7 +5885,7 @@ class XianyuSliderStealth:
                                         'sms_verify': 'sms_verify',
                                         'qr_verify': 'qr_verify',
                                         'face_verify': 'face_verify',
-                                        'unknown': 'face_verify'
+                                        'unknown': 'unknown'
                                     }
                                     event_type_names = {
                                         'password_error': '账号密码错误',
@@ -5764,7 +5894,7 @@ class XianyuSliderStealth:
                                         'face_verify': '人脸验证',
                                         'unknown': '身份验证'
                                     }
-                                    db_event_type = event_type_map.get(verification_type, 'face_verify')
+                                    db_event_type = event_type_map.get(verification_type, 'unknown')
                                     event_name = event_type_names.get(verification_type, '身份验证')
                                     db_manager.add_risk_control_log(
                                         cookie_id=self.pure_user_id,
@@ -5816,15 +5946,20 @@ class XianyuSliderStealth:
                                         screenshot_path=verification_screenshot
                                     )
 
-                                # 人脸验证或未知类型，继续原有逻辑
-                                face_verify_url = self._get_face_verification_url(frame)
-                                if face_verify_url:
-                                    logger.info(f"【{self.pure_user_id}】✅ 获取到人脸验证链接: {face_verify_url}")
+                                verify_url = None
+                                if verification_type == 'face_verify':
+                                    verify_url = self._get_face_verification_url(frame)
+                                    if verify_url:
+                                        logger.info(f"【{self.pure_user_id}】✅ 获取到人脸验证链接: {verify_url}")
+                                elif verification_type == 'unknown':
+                                    logger.warning(
+                                        f"【{self.pure_user_id}】验证类型仍不明确，保留为unknown，不默认按人脸验证处理"
+                                    )
 
                                 return True, VerificationFrameWrapper(
                                     frame,
                                     verification_type=verification_type if verification_type in {'face_verify', 'unknown'} else 'unknown',
-                                    verify_url=face_verify_url,
+                                    verify_url=verify_url,
                                     screenshot_path=verification_screenshot
                                 )
                     except PasswordLoginVerificationError:
@@ -5863,7 +5998,7 @@ class XianyuSliderStealth:
 
                             verification_screenshot = self._capture_verification_screenshot(page, frame=frame)
                             verify_url = frame_url
-                            if verification_type in {'face_verify', 'unknown'}:
+                            if verification_type == 'face_verify':
                                 verify_url = self._get_face_verification_url(frame) or frame_url
 
                             logger.info(f"【{self.pure_user_id}】✅ 在Frame {idx} 检测到 mini_login 页面（人脸验证/短信验证）")
@@ -5891,7 +6026,7 @@ class XianyuSliderStealth:
 
                                 verification_screenshot = self._capture_verification_screenshot(page, frame=frame)
                                 verify_url = frame_url
-                                if verification_type in {'face_verify', 'unknown'}:
+                                if verification_type == 'face_verify':
                                     verify_url = self._get_face_verification_url(frame) or frame_url
 
                                 return True, VerificationFrameWrapper(
@@ -6737,6 +6872,15 @@ class XianyuSliderStealth:
                     logger.info(f"【{self.pure_user_id}】✓ 账号已输入")
                     time.sleep(random.uniform(0.5, 1.0))
                 else:
+                    handled, recovery_result = self._recover_from_missing_login_inputs(
+                        context,
+                        page,
+                        missing_field='账号输入框',
+                        notification_callback=notification_callback,
+                        notification_scene=notification_scene,
+                    )
+                    if handled:
+                        return recovery_result
                     logger.error(f"【{self.pure_user_id}】✗ 未找到账号输入框")
                     return self._fail_login("未找到账号输入框")
                 
@@ -6752,6 +6896,15 @@ class XianyuSliderStealth:
                     logger.info(f"【{self.pure_user_id}】✓ 密码已输入")
                     time.sleep(random.uniform(0.5, 1.0))
                 else:
+                    handled, recovery_result = self._recover_from_missing_login_inputs(
+                        context,
+                        page,
+                        missing_field='密码输入框',
+                        notification_callback=notification_callback,
+                        notification_scene=notification_scene,
+                    )
+                    if handled:
+                        return recovery_result
                     logger.error(f"【{self.pure_user_id}】✗ 未找到密码输入框")
                     return self._fail_login("未找到密码输入框")
                 

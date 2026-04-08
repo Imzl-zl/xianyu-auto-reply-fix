@@ -3290,7 +3290,7 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
         # 更新会话信息
         password_login_sessions[session_id]['slider_instance'] = slider_instance
         
-        # 定义通知回调函数，用于检测到人脸认证时返回验证链接或截图（同步函数）
+        # 定义通知回调函数，用于检测到验证时返回验证链接或截图（同步函数）
         def notification_callback(
             message: str,
             screenshot_path: str = None,
@@ -3298,7 +3298,7 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
             screenshot_path_new: str = None,
             verification_type: str = None,
         ):
-            """人脸认证通知回调（同步）
+            """账号验证通知回调（同步）
             
             Args:
                 message: 通知消息
@@ -3324,15 +3324,16 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                         'verification_required',
                         screenshot_path=actual_screenshot_path,
                         verification_url=None,
-                        qr_code_url=None
+                        qr_code_url=None,
+                        verification_type=verification_type_label,
                     )
-                    log_with_user('info', f"人脸认证截图已保存: {session_id}, 路径: {actual_screenshot_path}", current_user)
+                    log_with_user('info', f"账号验证截图已保存: {session_id}, 路径: {actual_screenshot_path}", current_user)
                     
                     # 发送通知到用户配置的渠道
                     def send_face_verification_notification():
-                        """在后台线程中发送人脸验证通知"""
+                        """在后台线程中发送账号验证通知"""
                         try:
-                            log_with_user('info', f"开始尝试发送人脸验证通知: {account_id}", current_user)
+                            log_with_user('info', f"开始尝试发送账号验证通知: {account_id}", current_user)
                             notification_message = build_face_verify_notification(
                                 account_id=account_id,
                                 time_text=time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -3349,11 +3350,11 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                                 attachment_path=actual_screenshot_path,
                             )
                             if notification_sent:
-                                log_with_user('info', f"✅ 已发送人脸验证通知: {account_id}", current_user)
+                                log_with_user('info', f"✅ 已发送账号验证通知: {account_id}", current_user)
                             else:
-                                log_with_user('warning', f"人脸验证通知未发送成功: {account_id}", current_user)
+                                log_with_user('warning', f"账号验证通知未发送成功: {account_id}", current_user)
                         except Exception as notify_err:
-                            log_with_user('error', f"发送人脸验证通知时出错: {str(notify_err)}", current_user)
+                            log_with_user('error', f"发送账号验证通知时出错: {str(notify_err)}", current_user)
                             import traceback
                             log_with_user('error', f"通知错误详情: {traceback.format_exc()}", current_user)
                     
@@ -3362,7 +3363,7 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                     notification_thread = threading.Thread(target=send_face_verification_notification)
                     notification_thread.daemon = True
                     notification_thread.start()
-                    log_with_user('info', f"已启动人脸验证通知发送线程: {account_id}", current_user)
+                    log_with_user('info', f"已启动账号验证通知发送线程: {account_id}", current_user)
                 elif verification_url:
                     # 如果没有截图，使用验证链接（兼容旧版本）
                     _set_password_login_session_status(
@@ -3370,15 +3371,16 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                         'verification_required',
                         verification_url=verification_url,
                         screenshot_path=None,
-                        qr_code_url=None
+                        qr_code_url=None,
+                        verification_type=verification_type_label,
                     )
-                    log_with_user('info', f"人脸认证验证链接已保存: {session_id}, URL: {verification_url}", current_user)
+                    log_with_user('info', f"账号验证链接已保存: {session_id}, URL: {verification_url}", current_user)
                     
                     # 发送通知到用户配置的渠道
                     def send_face_verification_notification():
-                        """在后台线程中发送人脸验证通知"""
+                        """在后台线程中发送账号验证通知"""
                         try:
-                            log_with_user('info', f"开始尝试发送人脸验证通知: {account_id}", current_user)
+                            log_with_user('info', f"开始尝试发送账号验证通知: {account_id}", current_user)
                             notification_message = build_face_verify_notification(
                                 account_id=account_id,
                                 time_text=time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -3394,11 +3396,11 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                                 notification_type='face_verification',
                             )
                             if notification_sent:
-                                log_with_user('info', f"✅ 已发送人脸验证通知: {account_id}", current_user)
+                                log_with_user('info', f"✅ 已发送账号验证通知: {account_id}", current_user)
                             else:
-                                log_with_user('warning', f"人脸验证通知未发送成功: {account_id}", current_user)
+                                log_with_user('warning', f"账号验证通知未发送成功: {account_id}", current_user)
                         except Exception as notify_err:
-                            log_with_user('error', f"发送人脸验证通知时出错: {str(notify_err)}", current_user)
+                            log_with_user('error', f"发送账号验证通知时出错: {str(notify_err)}", current_user)
                             import traceback
                             log_with_user('error', f"通知错误详情: {traceback.format_exc()}", current_user)
                     
@@ -3407,9 +3409,9 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
                     notification_thread = threading.Thread(target=send_face_verification_notification)
                     notification_thread.daemon = True
                     notification_thread.start()
-                    log_with_user('info', f"已启动人脸验证通知发送线程: {account_id}", current_user)
+                    log_with_user('info', f"已启动账号验证通知发送线程: {account_id}", current_user)
             except Exception as e:
-                log_with_user('error', f"处理人脸认证通知失败: {str(e)}", current_user)
+                log_with_user('error', f"处理账号验证通知失败: {str(e)}", current_user)
         
         # 调用登录方法（同步方法，需要在后台线程中执行）
         import threading
@@ -3822,6 +3824,7 @@ async def password_login(
             'verification_url': None,
             'screenshot_path': None,
             'qr_code_url': None,
+            'verification_type': None,
             'slider_instance': None,
             'task': None,
             'timestamp': time.time(),
@@ -3880,15 +3883,17 @@ async def check_password_login_status(
         status = session['status']
         
         if status == 'verification_required':
-            # 需要人脸认证
+            # 需要身份验证
             screenshot_path = session.get('screenshot_path')
             verification_url = session.get('verification_url')
+            verification_type = session.get('verification_type') or '身份验证'
             return {
                 'status': 'verification_required',
                 'verification_url': verification_url,
                 'screenshot_path': screenshot_path,
                 'qr_code_url': session.get('qr_code_url'),  # 保留兼容性
-                'message': '需要人脸验证，请查看验证截图' if screenshot_path else '需要人脸验证，请点击验证链接'
+                'verification_type': verification_type,
+                'message': f'需要{verification_type}，请查看验证截图' if screenshot_path else f'需要{verification_type}，请点击验证链接'
             }
         elif status == 'success':
             # 登录成功
@@ -5131,7 +5136,7 @@ async def test_notification_template(data: TestNotificationIn, current_user: Dic
                 'time': time_module.strftime('%Y-%m-%d %H:%M:%S'),
                 'verification_action': '请点击验证链接完成验证:',
                 'verification_url': 'https://passport.goofish.com/mini_login.htm?example=test',
-                'verification_type': '人脸验证'
+                'verification_type': '身份验证'
             },
             'password_login_success': {
                 'account_id': '测试账号',
