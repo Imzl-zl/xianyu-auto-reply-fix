@@ -2825,6 +2825,7 @@ function getAboutStatusText(type, value) {
         keepalive: {
             started: '执行中',
             success: '成功',
+            recovered: '已恢复',
             auth_failed: '鉴权失败',
             api_failed: '接口失败',
             network_failed: '网络异常',
@@ -2835,8 +2836,15 @@ function getAboutStatusText(type, value) {
             started: '执行中',
             success: '成功',
             skipped_cooldown: '冷却跳过',
+            manual_refresh_active: '手动刷新进行中',
+            manual_refresh_browser_stabilizing: '浏览器稳定中',
+            post_slider_session_settling: '滑块后稳定中',
             restarted_after_cookie_refresh: '已触发重连',
             captcha_max_retries_exceeded: '滑块重试超限',
+            token_expired_recovery_failed: '过期恢复失败',
+            token_refresh_failed: '刷新失败',
+            token_refresh_exception: '刷新异常',
+            token_init_failed: '初始化失败',
             token_missing_after_refresh: '刷新后无 Token',
             token_missing: '无 Token',
             failed: '失败',
@@ -2860,7 +2868,7 @@ function getAboutStatusVariant(type, value) {
         return 'info';
     }
 
-    if (normalized === 'success') return 'success';
+    if (normalized === 'success' || normalized === 'recovered') return 'success';
     if (normalized === 'started' || normalized === 'connecting' || normalized === 'reconnecting') return 'info';
     if (normalized.includes('failed') || normalized.includes('exception') || normalized.includes('error')) return 'danger';
     if (normalized.includes('skipped') || normalized.includes('retry') || normalized.includes('restarted')) return 'warning';
@@ -3047,7 +3055,8 @@ function renderAboutRuntimeStatus(runtimeStatus) {
     const readinessCount = readinessItems.filter(item => item.ready).length;
     const overview = getAboutRuntimeOverview(runtimeStatus, readinessCount);
     const connectionTone = getAboutStatusVariant('connection', runtimeStatus.connection_state);
-    const keepaliveTone = getAboutStatusVariant('keepalive', runtimeStatus.session_keepalive_status);
+    const keepaliveDisplayStatus = runtimeStatus.session_keepalive_display_status || runtimeStatus.session_keepalive_status;
+    const keepaliveTone = getAboutStatusVariant('keepalive', keepaliveDisplayStatus);
     const tokenTone = getAboutStatusVariant('token', runtimeStatus.token_refresh_status);
     const readinessTone = readinessSignalItems.every(item => item.ready)
         ? 'success'
@@ -3073,8 +3082,10 @@ function renderAboutRuntimeStatus(runtimeStatus) {
                 })}
                 ${buildAboutRuntimeStatusItem({
                     label: '轻保活状态',
-                    value: buildAboutStatusBadge('keepalive', runtimeStatus.session_keepalive_status),
-                    note: `最近执行：${keepaliveDisplay}`,
+                    value: buildAboutStatusBadge('keepalive', keepaliveDisplayStatus),
+                    note: runtimeStatus.session_keepalive_display_note
+                        ? `最近执行：${keepaliveDisplay} · ${runtimeStatus.session_keepalive_display_note}`
+                        : `最近执行：${keepaliveDisplay}`,
                     tone: keepaliveTone,
                     richValue: true,
                     accent: 'keepalive',

@@ -2210,6 +2210,19 @@ def _get_runtime_age_seconds(value: Any) -> Optional[int]:
     return max(0, int(time.time() - timestamp))
 
 
+def _is_runtime_timestamp_recent(value: Any, window_seconds: Any) -> bool:
+    timestamp = _normalize_runtime_timestamp(value)
+    if timestamp is None:
+        return False
+
+    try:
+        window = max(1, int(float(window_seconds)))
+    except (TypeError, ValueError):
+        return False
+
+    return (time.time() - timestamp) <= window
+
+
 def _build_live_runtime_status(cookie_id: str) -> Dict[str, Any]:
     cleaned_cid = str(cookie_id or '').strip()
     runtime_status = {
@@ -2224,11 +2237,22 @@ def _build_live_runtime_status(cookie_id: str) -> Dict[str, Any]:
         'token_last_refreshed_at': None,
         'token_last_refreshed_at_display': None,
         'token_age_seconds': None,
+        'token_cached': False,
         'session_keepalive_status': None,
+        'session_keepalive_display_status': None,
+        'session_keepalive_display_note': None,
         'session_keepalive_error_message': None,
         'session_keepalive_at': None,
         'session_keepalive_at_display': None,
         'session_keepalive_age_seconds': None,
+        'session_transport_ready': False,
+        'last_heartbeat_response_at': None,
+        'last_heartbeat_response_at_display': None,
+        'last_heartbeat_age_seconds': None,
+        'last_heartbeat_sent_at': None,
+        'last_heartbeat_sent_at_display': None,
+        'last_heartbeat_sent_age_seconds': None,
+        'ws_transport_ready': False,
         'last_message_received_at': None,
         'last_message_received_at_display': None,
         'last_message_age_seconds': None,
@@ -2253,31 +2277,115 @@ def _build_live_runtime_status(cookie_id: str) -> Dict[str, Any]:
         return runtime_status
 
     connection_state = getattr(live_instance, 'connection_state', None)
+    connection_state_value = getattr(connection_state, 'value', str(connection_state or 'unknown'))
     ws = getattr(live_instance, 'ws', None)
     session = getattr(live_instance, 'session', None)
+    ws_transport_ready = bool(ws and not getattr(ws, 'closed', False))
+    session_transport_ready = bool(session and not getattr(session, 'closed', True))
+    token_cached = bool(getattr(live_instance, 'current_token', None))
+    token_refresh_status = getattr(live_instance, 'last_token_refresh_status', None)
+    session_keepalive_status = getattr(live_instance, 'last_session_keepalive_status', None)
+    heartbeat_response_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_heartbeat_response', 0))
+    heartbeat_sent_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_heartbeat_time', 0))
     token_refreshed_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_token_refresh_time', 0))
     session_keepalive_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_session_keepalive_time', 0))
     last_message_received_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_message_received_time', 0))
     last_successful_connection_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_successful_connection', 0))
     last_state_changed_at = _normalize_runtime_timestamp(getattr(live_instance, 'last_state_change_time', 0))
 
+    heartbeat_interval = max(1, int(getattr(live_instance, 'heartbeat_interval', 15) or 15))
+    heartbeat_timeout = max(1, int(getattr(live_instance, 'heartbeat_timeout', 30) or 30))
+    token_refresh_interval = max(60, int(getattr(live_instance, 'token_refresh_interval', 72000) or 72000))
+    token_retry_interval = max(30, int(getattr(live_instance, 'token_retry_interval', 180) or 180))
+    session_keepalive_interval = max(60, int(getattr(live_instance, 'session_keepalive_interval', 600) or 600))
+    session_keepalive_retry_interval = max(30, int(getattr(live_instance, 'session_keepalive_retry_interval', 180) or 180))
+
+    ws_ready_window = max(heartbeat_timeout * 2, heartbeat_interval * 3, 45)
+    recent_connection_window = max(heartbeat_interval + 5, 20)
+    session_ready_window = max(session_keepalive_interval + session_keepalive_retry_interval + 30, 180)
+    token_ready_window = max(token_refresh_interval + token_retry_interval, 300)
+
+    recent_connection = _is_runtime_timestamp_recent(last_successful_connection_at, recent_connection_window)
+    recent_heartbeat_ok = _is_runtime_timestamp_recent(heartbeat_response_at, ws_ready_window)
+    recent_session_success = (
+        session_keepalive_status == 'success'
+        and _is_runtime_timestamp_recent(session_keepalive_at, session_ready_window)
+    )
+    recent_token_success = (
+        token_refresh_status == 'success'
+        and _is_runtime_timestamp_recent(token_refreshed_at, token_ready_window)
+    )
+
+    token_explicit_failure_statuses = {
+        'captcha_max_retries_exceeded',
+        'token_expired_recovery_failed',
+        'token_refresh_failed',
+        'token_refresh_exception',
+        'token_init_failed',
+    }
+    session_display_status = session_keepalive_status
+    session_display_note = None
+    if (
+        session_keepalive_status in {'auth_failed', 'api_failed', 'network_failed', 'response_parse_failed', 'exception'}
+        and recent_token_success
+        and session_transport_ready
+    ):
+        session_display_status = 'recovered'
+        session_display_note = '轻保活最近一次失败，但已由后续 Token 恢复流程兜底恢复'
+
+    ws_ready = (
+        connection_state_value == 'connected'
+        and ws_transport_ready
+        and (recent_heartbeat_ok or recent_connection)
+    )
+    session_ready = (
+        session_transport_ready
+        and (
+            recent_session_success
+            or recent_token_success
+        )
+    )
+    token_ready = (
+        token_cached
+        and token_refresh_status not in token_explicit_failure_statuses
+        and (
+            recent_token_success
+            or (ws_ready and token_refresh_status in (None, 'success', 'started'))
+            or (
+                token_refresh_status is None
+                and _is_runtime_timestamp_recent(token_refreshed_at, token_ready_window)
+            )
+        )
+    )
+
     runtime_status.update({
         'instance_exists': True,
         'running': True,
-        'connection_state': getattr(connection_state, 'value', str(connection_state or 'unknown')),
-        'ws_ready': bool(ws and not getattr(ws, 'closed', False)),
-        'session_ready': bool(session and not getattr(session, 'closed', True)),
-        'has_current_token': bool(getattr(live_instance, 'current_token', None)),
-        'token_refresh_status': getattr(live_instance, 'last_token_refresh_status', None),
+        'connection_state': connection_state_value,
+        'ws_ready': ws_ready,
+        'session_ready': session_ready,
+        'has_current_token': token_ready,
+        'token_cached': token_cached,
+        'token_refresh_status': token_refresh_status,
         'token_refresh_error_message': getattr(live_instance, 'last_token_refresh_error_message', None),
         'token_last_refreshed_at': token_refreshed_at,
         'token_last_refreshed_at_display': _format_runtime_timestamp(token_refreshed_at),
         'token_age_seconds': _get_runtime_age_seconds(token_refreshed_at),
-        'session_keepalive_status': getattr(live_instance, 'last_session_keepalive_status', None),
+        'session_keepalive_status': session_keepalive_status,
+        'session_keepalive_display_status': session_display_status,
+        'session_keepalive_display_note': session_display_note,
         'session_keepalive_error_message': getattr(live_instance, 'last_session_keepalive_error_message', None),
         'session_keepalive_at': session_keepalive_at,
         'session_keepalive_at_display': _format_runtime_timestamp(session_keepalive_at),
         'session_keepalive_age_seconds': _get_runtime_age_seconds(session_keepalive_at),
+        'session_transport_ready': session_transport_ready,
+        'last_heartbeat_response_at': heartbeat_response_at,
+        'last_heartbeat_response_at_display': _format_runtime_timestamp(heartbeat_response_at),
+        'last_heartbeat_age_seconds': _get_runtime_age_seconds(heartbeat_response_at),
+        'last_heartbeat_sent_at': heartbeat_sent_at,
+        'last_heartbeat_sent_at_display': _format_runtime_timestamp(heartbeat_sent_at),
+        'last_heartbeat_sent_age_seconds': _get_runtime_age_seconds(heartbeat_sent_at),
+        'ws_transport_ready': ws_transport_ready,
         'last_message_received_at': last_message_received_at,
         'last_message_received_at_display': _format_runtime_timestamp(last_message_received_at),
         'last_message_age_seconds': _get_runtime_age_seconds(last_message_received_at),
